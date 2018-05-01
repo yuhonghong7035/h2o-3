@@ -41,7 +41,7 @@ spec:
     tty: true
     volumeMounts:
     - mountPath: /home/0xdiag
-      name: volume-0
+      name: datasets
   imagePullSecrets:
   - name: regcred
   volumes:
