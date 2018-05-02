@@ -109,9 +109,6 @@ try {
     if (!prJob) {
       pipelineContext.getEmailer().sendEmail(this, result, pipelineContext.getBuildSummary().getSummaryHTML(this))
     }
-    if (!pipelineContext.getHealthChecker().getHealthProblems().isEmpty()) {
-      pipelineContext.getEmailer().sendEmail(this, 'WARNING', pipelineContext.getHealthChecker().toEmail(this, pipelineContext), ['michalr@h2o.ai'])
-    }
   }
 }
 
