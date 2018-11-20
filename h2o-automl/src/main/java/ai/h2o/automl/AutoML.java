@@ -238,15 +238,15 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
             (buildSpec.build_control.stopping_criteria.seed() == -1 ? " (random)" : ""));
 
     // By default, stopping tolerance is adaptive to the training frame
-    if (this.buildSpec.build_control.stopping_criteria._stopping_tolerance == -1) {
+    if (this.buildSpec.build_control.stopping_criteria.stopping_tolerance() == -1) {
       this.buildSpec.build_control.stopping_criteria.set_default_stopping_tolerance_for_frame(this.trainingFrame);
       userFeedback.info(Stage.Workflow, "Setting stopping tolerance adaptively based on the training frame: " +
-              this.buildSpec.build_control.stopping_criteria._stopping_tolerance);
+              this.buildSpec.build_control.stopping_criteria.stopping_tolerance());
     } else {
-      userFeedback.info(Stage.Workflow, "Stopping tolerance set by the user: " + this.buildSpec.build_control.stopping_criteria._stopping_tolerance);
+      userFeedback.info(Stage.Workflow, "Stopping tolerance set by the user: " + this.buildSpec.build_control.stopping_criteria.stopping_tolerance());
 
-      double default_tolerance = RandomDiscreteValueSearchCriteria.default_stopping_tolerance_for_frame(this.trainingFrame);
-      if (this.buildSpec.build_control.stopping_criteria._stopping_tolerance < 0.7 * default_tolerance){
+      double default_tolerance = AutoMLBuildSpec.AutoMLStoppingCriteria.default_stopping_tolerance_for_frame(this.trainingFrame);
+      if (this.buildSpec.build_control.stopping_criteria.stopping_tolerance() < 0.7 * default_tolerance){
         userFeedback.warn(Stage.Workflow, "Stopping tolerance set by the user is < 70% of the recommended default of " + default_tolerance + ", so models may take a long time to converge or may not converge at all.");
       }
     }
@@ -335,7 +335,7 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
         this.validationFrame = splits[1];
         this.didValidationSplit = true;
         this.didLeaderboardSplit = false;
-        userFeedback.info(Stage.DataImport, "Automatically split the training data into training and validation frames in the ratio 80/20");
+        userFeedback.info(Stage.DataImport, "Automatically split the training data into training and validation frames in the ratio 90/10");
       } else {
         // case 3 and 4: nothing to do here
         userFeedback.info(Stage.DataImport, "Training and validation were both specified; no auto-splitting.");
@@ -387,7 +387,7 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
           this.validationFrame = splits[1];
           this.didValidationSplit = true;
           this.didLeaderboardSplit = false;
-          userFeedback.info(Stage.DataImport, "Automatically split the training data into training and validation frames in the ratio 80/20");
+          userFeedback.info(Stage.DataImport, "Automatically split the training data into training and validation frames in the ratio 90/10");
         } else {
           // case 8: all frames are there, no need to do anything
           userFeedback.info(Stage.DataImport, "Training, validation and leaderboard datasets were all specified; not auto-splitting.");
@@ -714,7 +714,7 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
     Algo algo = work.algo;
     setCommonModelBuilderParams(baseParms);
 
-    RandomDiscreteValueSearchCriteria searchCriteria = (RandomDiscreteValueSearchCriteria)buildSpec.build_control.stopping_criteria.clone();
+    RandomDiscreteValueSearchCriteria searchCriteria = (RandomDiscreteValueSearchCriteria) buildSpec.build_control.stopping_criteria.getSearchCriteria().clone();
     float remainingWorkRatio = (float) work.share / workAllocations.remainingWork();
 //    float remainingWorkRatio = (float) work.workShare / workAllocations.remainingWork(work.jobType);
     long maxAssignedTime = (long) Math.round(remainingWorkRatio * timeRemainingMs() / 1000);
@@ -768,6 +768,7 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
     params._response_column = buildSpec.input_spec.response_column;
     params._ignored_columns = buildSpec.input_spec.ignored_columns;
     params._seed = buildSpec.build_control.stopping_criteria.seed();
+    params._max_runtime_secs = buildSpec.build_control.stopping_criteria.max_model_runtime_secs();
 
     // currently required, for the base_models, for stacking:
     if (! (params instanceof StackedEnsembleParameters)) {
