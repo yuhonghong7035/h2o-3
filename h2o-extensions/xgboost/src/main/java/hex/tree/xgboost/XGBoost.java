@@ -55,9 +55,8 @@ public class XGBoost extends ModelBuilder<XGBoostModel,XGBoostModel.XGBoostParam
   public XGBoost(boolean startup_once) { super(new XGBoostModel.XGBoostParameters(),startup_once); }
   public boolean isSupervised(){return true;}
 
-  @Override protected int nModelsInParallel() {
-    // TODO should this be only 2?!
-    return 2;
+  @Override protected int nModelsInParallel(int folds) {
+    return nModelsInParallel(folds, 2);
   }
 
   /** Start the XGBoost training Job on an F/J thread. */
