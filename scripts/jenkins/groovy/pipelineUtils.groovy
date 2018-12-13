@@ -128,7 +128,7 @@ class PipelineUtils {
                 }
             }
 
-            return jsonResponse.tags.contains(version)
+            return jsonResponse.tags?.contains(version)
         }
     }
 
