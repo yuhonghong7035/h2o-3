@@ -1,6 +1,10 @@
 package ai.h2o.automl;
 
 import ai.h2o.automl.UserFeedbackEvent.Stage;
+import ai.h2o.automl.targetencoding.AllCategoricalTEApplicationStrategy;
+import ai.h2o.automl.targetencoding.BlendingParams;
+import ai.h2o.automl.targetencoding.TEApplicationStrategy;
+import ai.h2o.automl.targetencoding.TargetEncoder;
 import hex.Model;
 import hex.ModelBuilder;
 import hex.ScoreKeeper.StoppingMetric;
@@ -27,9 +31,7 @@ import water.nbhm.NonBlockingHashMap;
 import water.util.ArrayUtils;
 import water.util.IcedHashMapGeneric;
 import water.util.Log;
-import water.util.StringUtils;
 
-import java.io.IOException;
 import java.io.Serializable;
 import java.text.SimpleDateFormat;
 import java.util.*;
@@ -215,7 +217,6 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
     super(null);
   }
 
-  // https://0xdata.atlassian.net/browse/STEAM-52  --more interesting user options
   public AutoML(Key<AutoML> key, Date startTime, AutoMLBuildSpec buildSpec) {
     super(key);
 
@@ -225,33 +226,15 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
     this.buildSpec = buildSpec;
 
     userFeedback.info(Stage.Workflow, "AutoML job created: " + fullTimestampFormat.format(this.startTime));
+    userFeedback.info(Stage.Workflow, "Project: " + projectName());
 
     handleDatafileParameters(buildSpec);
+    
+    performAutoFeatureEngineering();
 
-    if (null != buildSpec.input_spec.fold_column && 5 != buildSpec.build_control.nfolds)
-      throw new H2OIllegalArgumentException("Cannot specify fold_column and a non-default nfolds value at the same time.");
-    if (null != buildSpec.input_spec.fold_column)
-      userFeedback.warn(Stage.Workflow, "Custom fold column, " + buildSpec.input_spec.fold_column + ", will be used. nfolds value will be ignored.");
+    handleCVParameters(buildSpec);
 
-    userFeedback.info(Stage.Workflow, "Build control seed: " +
-            buildSpec.build_control.stopping_criteria.seed() +
-            (buildSpec.build_control.stopping_criteria.seed() == -1 ? " (random)" : ""));
-
-    // By default, stopping tolerance is adaptive to the training frame
-    if (this.buildSpec.build_control.stopping_criteria._stopping_tolerance == -1) {
-      this.buildSpec.build_control.stopping_criteria.set_default_stopping_tolerance_for_frame(this.trainingFrame);
-      userFeedback.info(Stage.Workflow, "Setting stopping tolerance adaptively based on the training frame: " +
-              this.buildSpec.build_control.stopping_criteria._stopping_tolerance);
-    } else {
-      userFeedback.info(Stage.Workflow, "Stopping tolerance set by the user: " + this.buildSpec.build_control.stopping_criteria._stopping_tolerance);
-
-      double default_tolerance = RandomDiscreteValueSearchCriteria.default_stopping_tolerance_for_frame(this.trainingFrame);
-      if (this.buildSpec.build_control.stopping_criteria._stopping_tolerance < 0.7 * default_tolerance){
-        userFeedback.warn(Stage.Workflow, "Stopping tolerance set by the user is < 70% of the recommended default of " + default_tolerance + ", so models may take a long time to converge or may not converge at all.");
-      }
-    }
-
-    userFeedback.info(Stage.Workflow, "Project: " + projectName());
+    handleEarlyStoppingParameters(buildSpec);
 
     String sort_metric = buildSpec.input_spec.sort_metric == null ? null : buildSpec.input_spec.sort_metric.toLowerCase();
     // TODO: does this need to be updated?  I think its okay to pass a null leaderboardFrame
@@ -259,6 +242,79 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
 
     this.jobs = new ArrayList<>();
     this.tempFrames = new ArrayList<>();
+  }
+
+  private void performAutoFeatureEngineering() {
+    // Hardcoded default startegy for now
+    TEApplicationStrategy defaultTEApplicationStrategy = new AllCategoricalTEApplicationStrategy(this.trainingFrame);
+    performAutoTargetEncoding(defaultTEApplicationStrategy);
+  }
+
+  //TODO maybe to minimise coupling it is better to introduce AutoMLTEEncodingHelper that will take AutoML instance and return transformed one
+  private void performAutoTargetEncoding(TEApplicationStrategy strategy) {
+    
+    boolean hasCategoricalVecs = false;
+    for(Vec vec : trainingFrame.vecs()) {
+      if(vec.isCategorical()) {
+        hasCategoricalVecs = true;
+        break;
+      }
+    }
+    
+    if(hasCategoricalVecs) {
+
+      //TODO Either perform random grid search over parameters or introduce evolutionary selection algo
+      BlendingParams blendingParams = new BlendingParams(5, 1);
+      String[] columnsToEncode = strategy.getColumnsToEncode();
+      boolean withBlendedAvg = true;
+      boolean imputeNAsWithNewCategory = true;
+      int seed = 1234; // TODO make it a parameter for users to set
+      byte holdoutType = TargetEncoder.DataLeakageHandlingStrategy.KFold;
+
+      TargetEncoder tec = new TargetEncoder(columnsToEncode, blendingParams);
+
+      Frame trainingFrame = getTrainingFrame();
+      String responseColumnName = trainingFrame.name(trainingFrame.find(getResponseColumn()));
+      String foldColumnName = trainingFrame.name(trainingFrame.find(getFoldColumn()));
+
+      Map<String, Frame> encodingMap = tec.prepareEncodingMap(trainingFrame, responseColumnName, foldColumnName, imputeNAsWithNewCategory);
+      switch (holdoutType) {
+        case TargetEncoder.DataLeakageHandlingStrategy.KFold:
+          this.trainingFrame = tec.applyTargetEncoding(trainingFrame, responseColumnName, encodingMap, holdoutType, foldColumnName, withBlendedAvg, imputeNAsWithNewCategory, seed);
+          this.validationFrame = tec.applyTargetEncoding(getValidationFrame(), responseColumnName, encodingMap, TargetEncoder.DataLeakageHandlingStrategy.None, foldColumnName, withBlendedAvg, imputeNAsWithNewCategory, seed);
+          this.leaderboardFrame = tec.applyTargetEncoding(getLeaderboardFrame(), responseColumnName, encodingMap, TargetEncoder.DataLeakageHandlingStrategy.None, foldColumnName, withBlendedAvg, imputeNAsWithNewCategory, seed);
+          break;
+        case TargetEncoder.DataLeakageHandlingStrategy.LeaveOneOut:
+          //TODO
+      }
+    }
+
+  }
+  private void handleEarlyStoppingParameters(AutoMLBuildSpec buildSpec) {
+    RandomDiscreteValueSearchCriteria stoppingCriteria = buildSpec.build_control.stopping_criteria;
+    double stoppingTolerance = stoppingCriteria._stopping_tolerance;
+
+    userFeedback.info(Stage.Workflow, "Build control seed: " + stoppingCriteria.seed() + (stoppingCriteria.seed() == -1 ? " (random)" : ""));
+
+    // By default, stopping tolerance is adaptive to the training frame
+    if (stoppingTolerance == -1) {
+      stoppingCriteria.set_default_stopping_tolerance_for_frame(this.trainingFrame);
+      userFeedback.info(Stage.Workflow, "Setting stopping tolerance adaptively based on the training frame: " + stoppingTolerance);
+    } else {
+      userFeedback.info(Stage.Workflow, "Stopping tolerance set by the user: " + stoppingTolerance);
+
+      double default_tolerance = RandomDiscreteValueSearchCriteria.default_stopping_tolerance_for_frame(this.trainingFrame);
+      if (stoppingTolerance < 0.7 * default_tolerance){
+        userFeedback.warn(Stage.Workflow, "Stopping tolerance set by the user is < 70% of the recommended default of " + default_tolerance + ", so models may take a long time to converge or may not converge at all.");
+      }
+    }
+  }
+
+  private void handleCVParameters(AutoMLBuildSpec buildSpec) {
+    if (null != buildSpec.input_spec.fold_column && 5 != buildSpec.build_control.nfolds)
+      throw new H2OIllegalArgumentException("Cannot specify fold_column and a non-default nfolds value at the same time.");
+    if (null != buildSpec.input_spec.fold_column)
+      userFeedback.warn(Stage.Workflow, "Custom fold column, " + buildSpec.input_spec.fold_column + ", will be used. nfolds value will be ignored.");
   }
 
 
@@ -326,6 +382,9 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
     this.origTrainingFrame = DKV.getGet(buildSpec.input_spec.training_frame);
     this.validationFrame = DKV.getGet(buildSpec.input_spec.validation_frame);
     this.leaderboardFrame = DKV.getGet(buildSpec.input_spec.leaderboard_frame);
+
+    if (null == this.origTrainingFrame)
+      throw new H2OIllegalArgumentException("No training data has been specified, either as a path or a key.");
 
 
     if (this.origTrainingFrame.find(buildSpec.input_spec.response_column) == -1) {
@@ -398,12 +457,7 @@ public final class AutoML extends Lockable<AutoML> implements TimedH2ORunnable {
 
   public static AutoML makeAutoML(Key<AutoML> key, Date startTime, AutoMLBuildSpec buildSpec) {
 
-    AutoML autoML = new AutoML(key, startTime, buildSpec);
-
-    if (null == autoML.trainingFrame)
-      throw new H2OIllegalArgumentException("No training data has been specified, either as a path or a key.");
-
-    return autoML;
+    return new AutoML(key, startTime, buildSpec);
   }
 
   // used to launch the AutoML asynchronously
